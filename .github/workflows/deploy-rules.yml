@@ -1,10 +1,11 @@
-name: Deploy Rules PDF
+name: Deploy Pages
 
 on:
   push:
     branches: [main]
     paths:
       - 'rules/EyeOfTheBeeholderRules.pdf'
+      - 'web/**'
 
   workflow_dispatch:
 
@@ -29,6 +30,7 @@ jobs:
         run: |
           mkdir _site
           cp rules/EyeOfTheBeeholderRules.pdf _site/EyeOfTheBeeholderRules.pdf
+          cp -r web _site/play
 
       - uses: actions/upload-pages-artifact@v3
 
