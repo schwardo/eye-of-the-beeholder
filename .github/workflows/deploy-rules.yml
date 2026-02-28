@@ -1,0 +1,36 @@
+name: Deploy Rules PDF
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rules/EyeOfTheBeeholderRules.pdf'
+
+  workflow_dispatch:
+
+permissions:
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare site
+        run: |
+          mkdir _site
+          cp rules/EyeOfTheBeeholderRules.pdf _site/EyeOfTheBeeholderRules.pdf
+
+      - uses: actions/upload-pages-artifact@v3
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
