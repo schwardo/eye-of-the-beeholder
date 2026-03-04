@@ -663,6 +663,8 @@ const STRATEGY_DESC = {
   adaptive: 'Switches between greedy and defensive based on score'
 };
 
+const AI_THINKING_TIME_PER_TURN = 10; // seconds per AI turn
+
 // ============================================================
 // UTILITY
 // ============================================================
@@ -730,6 +732,8 @@ class BeeGame {
       hand: [],
       score: 0,
       index: i,
+      totalTime: 0, // seconds
+      turnCount: 0,
     }));
     this.numPlayers = this.players.length;
     this.cardsPerHand = options.cardsPerHand || 7;
@@ -751,6 +755,8 @@ class BeeGame {
     this.roundWinner = -1;
     this.winner = -1;
     this.log = [];
+    this.gameTime = 0; // total game time in seconds (present phase counted as concurrent)
+    this.presentTimes = []; // per-player times for current present round
   }
 
   addLog(msg, important = false) {
@@ -839,6 +845,7 @@ class BeeGame {
   startRound() {
     this.roundInHand++;
     this.playedCards = new Array(this.numPlayers).fill(-1);
+    this.presentTimes = new Array(this.numPlayers).fill(null);
     this.judgeResult = null;
     this.addLog(`Round ${this.roundInHand} of 7`, true);
   }
@@ -1255,6 +1262,7 @@ let uiState = {
   currentHumanPresenter: -1,
   autoAdvanceTimer: null,
   aiSpeed: 600, // ms delay for AI actions
+  humanTurnStart: null, // timestamp when current human turn began
 };
 
 // ============================================================
@@ -1560,7 +1568,7 @@ function renderPresent() {
     return `<div class="action-area pass-screen">
       <h2>Pass to ${game.players[humanIdx].name}</h2>
       <p>Don't peek at the screen until you're ready!</p>
-      <button class="btn btn-primary" onclick="uiState.passAndPlayReady=true;renderPlayScreen()">I'm Ready</button>
+      <button class="btn btn-primary" onclick="uiState.passAndPlayReady=true;startHumanTurnTimer();renderPlayScreen()">I'm Ready</button>
     </div>`;
   }
 
@@ -1739,9 +1747,12 @@ function renderGameOver() {
     <div class="final-scores">`;
   const sorted = [...game.players].sort((a, b) => b.score - a.score);
   for (const p of sorted) {
+    const avgTime = p.turnCount > 0 ? p.totalTime / p.turnCount : 0;
     html += `<div style="margin:4px 0"><b>${p.name}</b>: ${p.score} pts
-      ${!p.isHuman ? `[${STRATEGY_NAMES[p.strategy]}]` : '[Human]'}</div>`;
+      ${!p.isHuman ? `[${STRATEGY_NAMES[p.strategy]}]` : '[Human]'}
+      — ${formatTime(p.totalTime)} total (${formatTime(avgTime)}/turn, ${p.turnCount} turns)</div>`;
   }
+  html += `<div style="margin:8px 0;font-weight:bold">Total game time: ${formatTime(game.gameTime)}</div>`;
   html += `</div>
     <div class="btn-group" style="justify-content:center">
       <button class="btn btn-primary" onclick="startGame()">Play Again</button>
@@ -1762,6 +1773,50 @@ function renderLog() {
 }
 
 // ============================================================
+// TIME TRACKING
+// ============================================================
+function startHumanTurnTimer() {
+  uiState.humanTurnStart = Date.now();
+}
+
+function endHumanTurnTimer(playerIdx) {
+  if (uiState.humanTurnStart != null) {
+    const elapsed = (Date.now() - uiState.humanTurnStart) / 1000;
+    game.players[playerIdx].totalTime += elapsed;
+    game.players[playerIdx].turnCount++;
+    if (game.phase === 'present') {
+      game.presentTimes[playerIdx] = elapsed;
+    } else {
+      game.gameTime += elapsed;
+    }
+    uiState.humanTurnStart = null;
+  }
+}
+
+function recordAiTurn(playerIdx) {
+  game.players[playerIdx].totalTime += AI_THINKING_TIME_PER_TURN;
+  game.players[playerIdx].turnCount++;
+  if (game.phase === 'present') {
+    game.presentTimes[playerIdx] = AI_THINKING_TIME_PER_TURN;
+  } else {
+    game.gameTime += AI_THINKING_TIME_PER_TURN;
+  }
+}
+
+function finalizePresentRound() {
+  if (game.presentTimes.length > 0) {
+    game.gameTime += Math.max(...game.presentTimes.filter(t => t != null));
+    game.presentTimes = [];
+  }
+}
+
+function formatTime(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+// ============================================================
 // UI ACTIONS
 // ============================================================
 function selectDraftTile(attrIdx) {
@@ -1770,6 +1825,8 @@ function selectDraftTile(attrIdx) {
 }
 
 function confirmDraft(side) {
+  const draft = game.getCurrentDraft();
+  if (draft) endHumanTurnTimer(draft.player);
   game.draftTile(uiState.selectedDraftTile, side);
   uiState.selectedDraftTile = -1;
   renderPlayScreen();
@@ -1784,6 +1841,7 @@ function selectCard(cardId) {
 function humanPresentCard() {
   if (uiState.selectedCard < 0) return;
   const pIdx = uiState.currentHumanPresenter;
+  endHumanTurnTimer(pIdx);
   game.presentCard(pIdx, uiState.selectedCard);
   uiState.selectedCard = -1;
   uiState.passAndPlayReady = false;
@@ -1796,6 +1854,7 @@ function humanPresentCard() {
   } else {
     uiState.currentHumanPresenter = -1;
     // All presented, judge
+    finalizePresentRound();
     game.judge();
     renderPlayScreen();
   }
@@ -1840,6 +1899,7 @@ function facetClick(slotIdx) {
   if (uiState.manipMode === 'flip') {
     const action = { type: 'flip', slot: slotIdx };
     if (game.isValidManipulation(action)) {
+      endHumanTurnTimer(mIdx);
       game.applyManipulation(action);
       uiState.manipMode = null;
       uiState.swapFirst = -1;
@@ -1858,6 +1918,7 @@ function facetClick(slotIdx) {
     } else {
       const action = { type: 'swap', slotA: uiState.swapFirst, slotB: slotIdx };
       if (game.isValidManipulation(action)) {
+        endHumanTurnTimer(mIdx);
         game.applyManipulation(action);
         uiState.manipMode = null;
         uiState.swapFirst = -1;
@@ -1900,8 +1961,9 @@ function advanceGame() {
     const draft = game.getCurrentDraft();
     if (!draft) return;
     const p = game.players[draft.player];
-    if (p.isHuman) { renderPlayScreen(); return; }
+    if (p.isHuman) { startHumanTurnTimer(); renderPlayScreen(); return; }
     // AI draft
+    recordAiTurn(draft.player);
     const choice = AI.chooseDraft(p.strategy, p.hand, game.availableTiles, draft.slot, game.facets);
     game.draftTile(choice.attrIndex, choice.desiredValue);
     renderPlayScreen();
@@ -1913,6 +1975,7 @@ function advanceGame() {
     // AI players present cards
     for (let i = 0; i < game.numPlayers; i++) {
       if (!game.players[i].isHuman && game.playedCards[i] < 0) {
+        recordAiTurn(i);
         const state = game.getState();
         state.myIndex = i;
         const cardId = AI.chooseCard(game.players[i].strategy, game.players[i].hand, game.facets, state);
@@ -1923,11 +1986,13 @@ function advanceGame() {
     const firstHuman = game.players.findIndex((p, i) => p.isHuman && game.playedCards[i] < 0);
     if (firstHuman >= 0) {
       uiState.currentHumanPresenter = firstHuman;
+      startHumanTurnTimer();
       renderPlayScreen();
       return; // Wait for human
     }
     // All presented, judge
     uiState.currentHumanPresenter = -1;
+    finalizePresentRound();
     game.judge();
     renderPlayScreen();
     // If no humans at all, auto-advance through judge
@@ -1949,8 +2014,9 @@ function advanceGame() {
     const mIdx = game.getCurrentManipulator();
     if (mIdx < 0) return;
     const p = game.players[mIdx];
-    if (p.isHuman) { renderPlayScreen(); return; }
+    if (p.isHuman) { startHumanTurnTimer(); renderPlayScreen(); return; }
     // AI manipulate
+    recordAiTurn(mIdx);
     const validActions = game.getValidManipulations();
     const state = game.getState();
     state.myIndex = mIdx;
